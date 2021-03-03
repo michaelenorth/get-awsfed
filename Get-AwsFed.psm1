@@ -344,7 +344,7 @@ Function Get-AWSAccount {
 
     # parse aws saml response for account information
 
-    $Parsed = $Parser.ParseDocument($T.Content)
+    $Parsed = $Parser.ParseDocument($saml_rsp.Content)
     $form = $parsed.forms[0]
     $t = $form.outerHTML.Split("`n").Trim() | Select-String "Account:"
 
