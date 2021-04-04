@@ -1,4 +1,13 @@
 # Set-StrictMode -Version latest
+$USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.114 Safari/537.36 Edg/89.0.774.68"
+
+Function UrlEncode ($urlToEncode) {
+    return [System.Web.HttpUtility]::UrlEncode($urlToEncode)
+}
+Function UrlDecode ($urlToDecode) {
+    return [System.Web.HttpUtility]::UrlDecode($urlToDecode)
+}
+
 Function Get-AwsFed {
     [CmdletBinding()]
     Param (
@@ -41,9 +50,11 @@ Function Get-AwsFed {
 
         If ($R.InputFields[0].name -ne 'SAMLResponse') {
 
-            Write-Verbose "Begin ASU Duo Factor Login"
+            Write-Verbose "Begin ASU cas weblogin"
 
+            # ------------------------------------------------------------
             # -- post username and password
+            # ------------------------------------------------------------
             Write-Verbose "Post Username & Password"
             $Parsed = $Parser.ParseDocument($R.Content)
             $form = $Parsed.All | Where-Object ID -EQ 'login'
@@ -51,18 +62,24 @@ Function Get-AwsFed {
             $form.elements | Where-Object type -NE 'fieldset' | ForEach-Object { $fields.add( $_.name, $_.value ) }
             $fields["username"] = ($fedCredential.GetNetworkCredential().UserName).ToLower()
             $fields["password"] = $fedCredential.GetNetworkCredential().Password
-            $fields.Remove("rememberid") # = "false"
+            $fields["rememberid"] = "true"
+            $fields.Remove("submit")
+
+            $headers = @{}
 
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = $R.BaseResponse.ResponseUri
                 $uri = $uri.Scheme + "://" + $uri.Host + $uri.LocalPath
             } else {
                 # HttpsReponseMessage - powershell 6.2+
-                $uri = $R.BaseResponse.RequestMessage.RequestUri
-                $uri = $uri.Scheme + "://" + $uri.DnsSafeHost + $uri.LocalPath
+                $t = $R.BaseResponse.RequestMessage.RequestUri
+                $uri = $t.Scheme + "://" + $t.DnsSafeHost + $t.LocalPath
+
+                $headers["Origin"] = $t.Scheme + "://" + $t.DnsSafeHost
+                $headers['Referer'] = $R.BaseResponse.RequestMessage.RequestUri.OriginalString
             }
 
-            $R = WebPost -uri $uri -body $fields -maxRedirect 0
+            $R = WebPost -uri $uri -body $fields -maxRedirect 0 -headers $headers
             Write-Verbose "*********************************"
 
             #cmen - $r.forms.id is a problem (fix this)
@@ -91,23 +108,28 @@ Function Get-AwsFed {
             Write-Verbose "sig_request: $sig_request"
             $sig_request = $sig_request.split(":")
 
+            $headers = @{}
+
             # -- get parent
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $parent = $R.BaseResponse.ResponseUri.AbsoluteUri
             } else {
                 # HttpsReponseMessage - powershell 6.2+
-                $parent = $R.BaseResponse.RequestMessage.RequestUri
+                $parent = urlencode $R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+                $headers['Referer'] = ($R.BaseResponse.RequestMessage.Headers | Where-Object key -eq 'Origin').Value[0] + '/'
             }
 
             # $parent = $R.BaseResponse.ResponseUri.AbsoluteUri
-
             # -- combine into complete action statement
-            $action = "?tx=$($sig_request[0])&parent=$parent&v=2.3"
+            $action = "?tx=$($sig_request[0])&parent=$parent&v=2.6"
             $site = "https://$($e.'data-host')/frame/web/v1/auth"
-            $R = WebGet -uri ($site + $action) -maxRedirect 0 -basic $true
+            $uri = $site + $action
+
+            $R = WebGet -uri $uri -maxRedirect 0 -basic $true -headers $headers
 
             ## ------------------------------------------------------------
-
+            # plugin form
+            Write-Verbose "plugin_form"
             $Parsed = $Parser.ParseDocument($R.Content)
             $form = $Parsed.forms | Where-Object ID -EQ 'plugin_form'
             $fields = @{}
@@ -117,24 +139,65 @@ Function Get-AwsFed {
             $fields["screen_resolution_width"] = "150"
             $fields["screen_resolution_height"] = "100"
             $fields["color_depth"] = "24"
+            $fields["is_cef_browser"] = "false"
+            $fields["is_ipad_os"] = "false"
+            $fields["react_support"] = "true"
+
+
+            $headers = @{}
+
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = $R.BaseResponse.ResponseUri.AbsoluteUri
             } else {
                 # HttpsReponseMessage - powershell 6.2+
-                $uri = $R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+                $t = $R.BaseResponse.RequestMessage.RequestUri
+                $uri = $t.OriginalString
+                $headers["Origin"] = $t.Scheme + "://" + $t.DnsSafeHost
+                $headers['Referer'] = $t.OriginalString
             }
 
-            $R = WebPost -uri $uri -body $fields -MaxRedirect 5
+            $R = WebPost -uri $uri -body $fields -MaxRedirect 5 -headers $headers
 
             ## ------------------------------------------------------------
+            # endpoint-health-form
+            Write-Verbose "endpoint-health-form"
+            $Parsed = $Parser.ParseDocument($R.Content)
+            $form = $Parsed.forms | Where-Object ID -EQ 'endpoint-health-form'
+            $fields = @{}
+            $form.elements | Where-Object type -NE 'fieldset' | ForEach-Object { $fields.add( $_.name, $_.value ) }
+
+            $headers = @{}
+            $headers["Cache-Control"] = "max-age=0"
+            If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
+                $uri = $R.BaseResponse.ResponseUri.AbsoluteUri
+            } else {
+                # HttpsReponseMessage - powershell 6.2+
+                # $uri = $R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+                $t = $R.BaseResponse.RequestMessage.RequestUri
+                $uri = $t.OriginalString
+                $headers["Origin"] = $t.Scheme + "://" + $t.DnsSafeHost
+                $headers['Referer'] = $t.OriginalString
+            }
+
+            $R = WebPost -uri $uri -body $fields -MaxRedirect 5 -headers $headers
+
+
+            ## ------------------------------------------------------------
+            # login-form
             ## Add a check here for two-factor response page (right now assume duo push)
 
+            # xhr #1
+
+            Write-Verbose "login-form xhr#1"
             $Parsed = $Parser.ParseDocument($R.Content)
             $form = $Parsed.forms | Where-Object ID -EQ 'login-form'
             $fields = @{}
             $form.elements | Where-Object { $_.type -NE 'fieldset' -and $_.parent.nodename -eq 'FORM' } | ForEach-Object { $fields.add( $_.name, $_.value ) }
             $fields["device"] = "phone1"
             $fields["factor"] = "Duo Push"
+            $fields["out_of_date"] = "False"
+            $fields["days_out_of_date"] = "0"
+            $fields["days_to_block"] = "None"
             $null = $fields.Remove("url")
             $null = $fields.Remove("enrollment_message")
             $null = $fields.Remove("itype")
@@ -146,30 +209,64 @@ Function Get-AwsFed {
             $null = $fields.Remove("next-passcode")
             $null = $fields.Remove("has-token")
             $null = $fields.Remove("dampen_choice")
+            $null = $fields.Remove("should_update_dm")
+            $null = $fields.Remove("should_retry_u2f_timeouts")
+            $null = $fields.Remove("has_phone_that_requires_compliance_text")
+            $null = $fields.Remove("ukey")
 
-            $sid = $fields["sid"]
+            $sid = urldecode $fields["sid"]
+
+            $headers = @{}
+            $headers["Accept"]="text/plain, */*; q=0.01"
+            $headers["X-Requested-With"] = "XMLHttpRequest"
 
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = [System.Uri]$R.BaseResponse.ResponseUri.AbsoluteUri
             } else {
                 # HttpsReponseMessage - powershell 6.2+
-                $uri = [System.Uri]$R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+                # $uri = [System.Uri]$R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+
+                $t = $R.BaseResponse.RequestMessage.RequestUri
+                $uri = [System.Uri]$t.AbsoluteUri
+                $headers["Origin"] = $t.Scheme + "://" + $t.DnsSafeHost
+                $headers['Referer'] = $t.OriginalString
             }
             $uri = $uri.Scheme + "://" + $uri.Host + $form.Action
 
-            $R = WebPost -uri $uri -body $fields
+            $R2 = WebPost -uri $uri -body $fields -headers $headers
+
+            $content = $R2.content | ConvertFrom-Json
+            if ($content.stat -eq 'FAIL') {
+                Write-Output $R2.content
+                Write-Output "2-Factor NOT successful"
+                return
+            }
+
+            # xhr #2
+
+            # xhr #3
+
+            # xhr #4
+
 
             # ------------------------------------------------------------
             # -- Poll for two-factor response
             # ------------------------------------------------------------
+            Write-Verbose "Poll"
+            $txid = ($R2.Content | ConvertFrom-Json).response.txid
 
-            $txid = ($R.Content | ConvertFrom-Json).response.txid
+            $headers = @{}
+            $headers["Accept"]="text/plain, */*; q=0.01"
+            $headers["X-Requested-With"] = "XMLHttpRequest"
 
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = [System.Uri]$R.BaseResponse.ResponseUri.AbsoluteUri
             } else {
                 # HttpsReponseMessage - powershell 6.2+
-                $uri = [System.Uri]$R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+                $t = $R.BaseResponse.RequestMessage.RequestUri
+                $uri = [System.Uri]$t.AbsoluteUri
+                $headers["Origin"] = $t.Scheme + "://" + $t.DnsSafeHost
+                $headers['Referer'] = $t.OriginalString
             }
             $uri = $uri.Scheme + "://" + $uri.Host + "/frame/status"
             $action = @{sid = $sid; txid = $txid }
@@ -178,16 +275,22 @@ Function Get-AwsFed {
             for ($i = 0; $i -lt 30; $i++) {
                 Start-Sleep -Seconds 1
 
-                $R = WebPost -uri $uri -body $action
+                $R2 = WebPost -uri $uri -body $action -headers $headers
 
-                $response = ($R.content | ConvertFrom-Json).response
+                $content = $R2.content | ConvertFrom-Json
+                $response = $content.response
 
                 if ($response.result -eq "SUCCESS") {
-                    Write-Output $response.result #-ForegroundColor Green
+                    Write-Output $response.status
                     break
                 }
-                if ($response.result -eq "FAILURE") {
-                    Write-Output $response.result #-ForegroundColor Red
+                if ($response.result -eq 'FAILURE') {
+                    Write-Output $response.status
+                    Write-Output "2-Factor NOT successful"
+                    return
+                }
+                if ($content.stat -eq 'FAIL') {
+                    Write-Output $response.status
                     Write-Output "2-Factor NOT successful"
                     return
                 }
@@ -197,24 +300,33 @@ Function Get-AwsFed {
                 return
             }
             if ($response.result -ne "SUCCESS") {
-                Write-Output $response.result # -ForegroundColor Red
+                Write-Output ($response | convertto-json)
                 Write-Output "2-Factor NOT successful"
                 return
             }
 
             #-- additional page
+            $headers = @{}
+            $headers["Accept"]="text/plain, */*; q=0.01"
+            $headers["X-Requested-With"] = "XMLHttpRequest"
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = [System.Uri]$R.BaseResponse.ResponseUri.AbsoluteUri
             } else {
                 # HttpsReponseMessage - powershell 6.2+
-                $uri = [System.Uri]$R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+                $t = $R.BaseResponse.RequestMessage.RequestUri
+                $uri = [System.Uri]$t.AbsoluteUri
+                $headers["Origin"] = $t.Scheme + "://" + $t.DnsSafeHost
+                $headers['Referer'] = $t.OriginalString
             }
-            # $uri = [System.Uri]$R.BaseResponse.ResponseUri.AbsoluteUri
-            $result_url = ($R.content | ConvertFrom-Json).response.result_url
+            $result_url = ($R2.content | ConvertFrom-Json).response.result_url
             $uri = $uri.Scheme + "://" + $uri.Host + $result_url
-            # similar action
             $action = @{sid = $sid }
-            $R = WebPost -uri $uri -body $action
+
+            $R = WebPost -uri $uri -body $action -headers $headers
+
+
+            # ----------------------------------------------------
+
 
             $body = ($R.Content | ConvertFrom-Json).Response
             $uri = $body.Parent
@@ -236,6 +348,7 @@ Function Get-AwsFed {
         #-- auto post (passes assertion to amazonaws.com)
         $uri = [XML]$R.Content
         $uri = $uri.html.body.form.action
+        
         $saml = WebPost -uri $uri -body @{SAMLResponse = $assertion }
 
         #-- select a role
@@ -296,7 +409,8 @@ Function WebPost {
         [Parameter(Mandatory = $true)] [Uri] $uri,
         [Parameter(Mandatory = $true)] [Object] $body,
         [Parameter(Mandatory = $false)] [Int32] $maxRedirect = 5,
-        [Parameter(Mandatory = $false)] $basic = $false
+        [Parameter(Mandatory = $false)] $basic = $false,
+        [Parameter(Mandatory = $false)] $headers = @{}
     )
 
     # Write-Verbose "<WebPost> Uri: $uri"
@@ -308,9 +422,16 @@ Function WebPost {
     $p.MaximumRedirection = $maxRedirect
     $p.ErrorAction = "Ignore"
     $p.UseBasicParsing = $basic
+    $p.UserAgent = $USER_AGENT
+    $p.Headers = $headers
 
     Try {
+        Write-Verbose "[WebPost:Begin]"
+        Write-Verbose ($p | ConvertTo-Json)
         $Response = Invoke-WebRequest @p -WebSession $global:fb
+        Write-Verbose "Response: $($Response.StatusCode) - $($Response.StatusDescription)"
+        # Write-Verbose "WebPost: $($Response)"
+        Write-Verbose "[WebPost:End]"
         Return $Response
     }
     Catch {
@@ -324,7 +445,8 @@ Function WebGet {
     param (
         [Parameter(Mandatory = $true)] [Uri] $uri,
         [Parameter(Mandatory = $false)] [Int32] $maxRedirect = 5,
-        [Parameter(Mandatory = $false)] $basic = $false
+        [Parameter(Mandatory = $false)] $basic = $false,
+        [Parameter(Mandatory = $false)] $headers = @{}
     )
 
     $p = @{ }
@@ -333,9 +455,15 @@ Function WebGet {
     $p.MaximumRedirection = $maxRedirect
     $p.ErrorAction = "Ignore"
     $p.UseBasicParsing = $basic
+    $p.UserAgent = $USER_AGENT
+    $p.Headers = $headers
 
+    Write-Verbose "[WebGet:Begin]"
+    Write-Verbose ($p | ConvertTo-Json)
     $Response = Invoke-WebRequest @p -WebSession $global:fb
-    Write-Verbose "Response: $($Response.StatusCode) - $($Response.StatusDescription)"
+    Write-Verbose "WebGet Response: $($Response.StatusCode) - $($Response.StatusDescription)"
+    Write-Verbose "[WebGet:End]"
+    # Write-Verbose "WebGet: $($Response)"
     Return $Response
 }
 
@@ -351,7 +479,7 @@ Function Get-AWSAccount {
     # $t = $saml_rsp.ParsedHTML.body.outertext.Split("`n").Trim() | Select-String "Account:"
     $a = [ordered]@{}
     foreach ($l in $t) {
-        $l = ([string]$l).replace('<div ','').replace('</div>','')
+        $l = ([string]$l).replace('<div ', '').replace('</div>', '')
         $l = $l.Split(" ")
         $acctnbr = $l[2].Substring(1, $l[2].Length - 2)
         $a.$acctnbr = $l[1]
@@ -359,7 +487,7 @@ Function Get-AWSAccount {
     $accounts = [PSCustomObject]$a
 
     # parse saml assertion for account information
-    $assertion = ($Parsed.Forms[0].Elements | Where-Object Name -eq 'SAMLResponse').Value
+    $assertion = ($Parsed.Forms[0].Elements | Where-Object Name -EQ 'SAMLResponse').Value
 
     # $assertion = ($saml_rsp.InputFields | Where-Object { $_.name -eq "SAMLResponse" }).value
     $assertion_decode = [xml][text.encoding]::utf8.getstring([convert]::FromBase64String($assertion))
