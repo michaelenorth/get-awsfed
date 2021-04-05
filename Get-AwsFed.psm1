@@ -8,6 +8,118 @@ Function UrlDecode ($urlToDecode) {
     return [System.Web.HttpUtility]::UrlDecode($urlToDecode)
 }
 
+Function Clear-Globals {
+    Write-Verbose "Clearing GLobal Variables"
+    if ($fb) { Clear-Variable "fb" -Scope Global }
+    if ($fedCredential) { Clear-Variable "fedCredential"  -Scope Global }
+}
+
+Function WebPost {
+    param (
+        [Parameter(Mandatory = $true)] [Uri] $uri,
+        [Parameter(Mandatory = $true)] [Object] $body,
+        [Parameter(Mandatory = $false)] [Int32] $maxRedirect = 5,
+        [Parameter(Mandatory = $false)] $basic = $false,
+        [Parameter(Mandatory = $false)] $headers = @{}
+    )
+
+    $p = @{
+        Uri                = $uri
+        Method             = "Post"
+        Body               = $body
+        MaximumRedirection = $maxRedirect
+        ErrorAction        = "Ignore"
+        UseBasicParsing    = $basic
+        UserAgent          = $USER_AGENT
+        Headers            = $headers
+    }
+
+    Write-Verbose "[WebPost:Begin]"
+    Write-Verbose ($p | ConvertTo-Json)
+
+    Try {
+        $Response = Invoke-WebRequest @p -WebSession $global:fb
+        Write-Verbose "Response: $($Response.StatusCode) - $($Response.StatusDescription)"
+    }
+    Catch {
+        $Response = ""
+        Return
+    }
+    Write-Verbose "[WebPost:End]"
+    Return $Response
+}
+
+Function WebGet {
+    param (
+        [Parameter(Mandatory = $true)] [Uri] $uri,
+        [Parameter(Mandatory = $false)] [Int32] $maxRedirect = 5,
+        [Parameter(Mandatory = $false)] $basic = $false,
+        [Parameter(Mandatory = $false)] $headers = @{}
+    )
+
+    $p = @{
+        Uri                = $uri
+        Method             = "Default"
+        MaximumRedirection = $maxRedirect
+        ErrorAction        = "Ignore"
+        UseBasicParsing    = $basic
+        UserAgent          = $USER_AGENT
+        Headers            = $headers
+    }
+
+    Write-Verbose "[WebGet:Begin]"
+    Write-Verbose ($p | ConvertTo-Json)
+
+    $Response = Invoke-WebRequest @p -WebSession $global:fb
+
+    Write-Verbose "WebGet Response: $($Response.StatusCode) - $($Response.StatusDescription)"
+    Write-Verbose "[WebGet:End]"
+
+    Return $Response
+}
+
+Function Setup-AngleSharp {
+
+    # Load AngleSharp assembly and dependencies
+
+    $myError = $false
+    @(
+        'AngleSharp'
+        'System.Text.Encoding.CodePages',
+        'System.Runtime.CompilerServices.Unsafe'
+    ) | ForEach-Object {
+        $assembly = $_
+        try { Add-Type -AssemblyName $_ -ErrorAction Stop }
+
+        catch {
+
+            Try {
+                $path = (Get-Package $assembly -ErrorAction Stop).Source
+                $path = $path | Split-Path
+                Add-Type -Path (Get-ChildItem -Path "$path*\lib\netstandard2.0\*.dll").FullName
+            }
+            catch {
+                $myError = $true
+                Write-Warning "Missing $assembly. Please install the package from Nuget..."
+                Switch ($assembly) {
+                    "AngleSharp" { Write-Output "Install-Package -ProviderName Nuget -SkipDependencies -Name AngleSharp -Scope CurrentUser" }
+                    "System.Text.Encoding.CodePages" { Write-Output "Install-Package -ProviderName Nuget -SkipDependencies -Name System.Text.Encoding.CodePages -MaximumVersion 4.5.0 -Scope CurrentUser" }
+                    "System.Runtime.CompilerServices.Unsafe" { Write-Output "Install-Package -ProviderName Nuget -skipDependencies -Name System.Runtime.CompilerServices.Unsafe -MaximumVersion 4.5.0 -Scope CurrentUser" }
+                }
+                Write-Output ""
+            }
+        }
+    }
+    if ($myerror) {
+        try { $null = Get-PackageSource -Name nuget -ErrorAction Stop }
+        catch {
+            Write-Warning "Register nuget as a provider..."
+            Write-Output "Register-PackageSource -Name NuGet -Location 'https://www.nuget.org/api/v2' -ProviderName NuGet"
+        }
+        break foobar
+    }
+}
+
 Function Get-AwsFed {
     [CmdletBinding()]
     Param (
@@ -24,8 +136,6 @@ Function Get-AwsFed {
             return
         }
 
-        Setup-AngleSharp
-
         if (-not ($fb)) {
             $global:fb = New-Object -TypeName Microsoft.PowerShell.Commands.WebRequestSession
         }
@@ -38,9 +148,9 @@ Function Get-AwsFed {
                 return
             }
         }
-
         if (-not $fedCredential) { return }
 
+        Setup-AngleSharp
         $Parser = New-Object AngleSharp.Html.Parser.HtmlParser
 
         # -- main landing page
@@ -52,9 +162,7 @@ Function Get-AwsFed {
 
             Write-Verbose "Begin ASU cas weblogin"
 
-            # ------------------------------------------------------------
             # -- post username and password
-            # ------------------------------------------------------------
             Write-Verbose "Post Username & Password"
             $Parsed = $Parser.ParseDocument($R.Content)
             $form = $Parsed.All | Where-Object ID -EQ 'login'
@@ -66,35 +174,29 @@ Function Get-AwsFed {
             $fields.Remove("submit")
 
             $headers = @{}
-
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = $R.BaseResponse.ResponseUri
                 $uri = $uri.Scheme + "://" + $uri.Host + $uri.LocalPath
-            } else {
+            }
+            else {
                 # HttpsReponseMessage - powershell 6.2+
                 $t = $R.BaseResponse.RequestMessage.RequestUri
                 $uri = $t.Scheme + "://" + $t.DnsSafeHost + $t.LocalPath
-
                 $headers["Origin"] = $t.Scheme + "://" + $t.DnsSafeHost
-                $headers['Referer'] = $R.BaseResponse.RequestMessage.RequestUri.OriginalString
+                $headers['Referer'] = $t.OriginalString
             }
 
             $R = WebPost -uri $uri -body $fields -maxRedirect 0 -headers $headers
             Write-Verbose "*********************************"
 
-            #cmen - $r.forms.id is a problem (fix this)
             If (-not $R -or $R.Forms.Id -eq 'login') {
                 Write-Output "User ID and/or Password Incorrect"
+                Write-Output $R
                 Clear-Globals
                 return
             }
-            Write-Verbose "*********************************"
 
             $preDuoCasResponse = $R
-            # ------------------------------------------------------------
-            # DUO
-            # ------------------------------------------------------------
-            # the response is the duo auth page.
 
             Write-Verbose "Begin Duo Authentication"
 
@@ -109,17 +211,16 @@ Function Get-AwsFed {
             $sig_request = $sig_request.split(":")
 
             $headers = @{}
-
             # -- get parent
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $parent = $R.BaseResponse.ResponseUri.AbsoluteUri
-            } else {
+            }
+            else {
                 # HttpsReponseMessage - powershell 6.2+
                 $parent = urlencode $R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
-                $headers['Referer'] = ($R.BaseResponse.RequestMessage.Headers | Where-Object key -eq 'Origin').Value[0] + '/'
+                $headers['Referer'] = ($R.BaseResponse.RequestMessage.Headers | Where-Object key -EQ 'Origin').Value[0] + '/'
             }
 
-            # $parent = $R.BaseResponse.ResponseUri.AbsoluteUri
             # -- combine into complete action statement
             $action = "?tx=$($sig_request[0])&parent=$parent&v=2.6"
             $site = "https://$($e.'data-host')/frame/web/v1/auth"
@@ -127,8 +228,7 @@ Function Get-AwsFed {
 
             $R = WebGet -uri $uri -maxRedirect 0 -basic $true -headers $headers
 
-            ## ------------------------------------------------------------
-            # plugin form
+            # -- plugin form --
             Write-Verbose "plugin_form"
             $Parsed = $Parser.ParseDocument($R.Content)
             $form = $Parsed.forms | Where-Object ID -EQ 'plugin_form'
@@ -143,12 +243,11 @@ Function Get-AwsFed {
             $fields["is_ipad_os"] = "false"
             $fields["react_support"] = "true"
 
-
             $headers = @{}
-
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = $R.BaseResponse.ResponseUri.AbsoluteUri
-            } else {
+            }
+            else {
                 # HttpsReponseMessage - powershell 6.2+
                 $t = $R.BaseResponse.RequestMessage.RequestUri
                 $uri = $t.OriginalString
@@ -158,8 +257,7 @@ Function Get-AwsFed {
 
             $R = WebPost -uri $uri -body $fields -MaxRedirect 5 -headers $headers
 
-            ## ------------------------------------------------------------
-            # endpoint-health-form
+            # -- endpoint-health-form --
             Write-Verbose "endpoint-health-form"
             $Parsed = $Parser.ParseDocument($R.Content)
             $form = $Parsed.forms | Where-Object ID -EQ 'endpoint-health-form'
@@ -170,9 +268,9 @@ Function Get-AwsFed {
             $headers["Cache-Control"] = "max-age=0"
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = $R.BaseResponse.ResponseUri.AbsoluteUri
-            } else {
+            }
+            else {
                 # HttpsReponseMessage - powershell 6.2+
-                # $uri = $R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
                 $t = $R.BaseResponse.RequestMessage.RequestUri
                 $uri = $t.OriginalString
                 $headers["Origin"] = $t.Scheme + "://" + $t.DnsSafeHost
@@ -181,11 +279,7 @@ Function Get-AwsFed {
 
             $R = WebPost -uri $uri -body $fields -MaxRedirect 5 -headers $headers
 
-
-            ## ------------------------------------------------------------
-            # login-form
-            ## Add a check here for two-factor response page (right now assume duo push)
-
+            # -- login-form --
             # xhr #1
 
             Write-Verbose "login-form xhr#1"
@@ -217,12 +311,13 @@ Function Get-AwsFed {
             $sid = urldecode $fields["sid"]
 
             $headers = @{}
-            $headers["Accept"]="text/plain, */*; q=0.01"
+            $headers["Accept"] = "text/plain, */*; q=0.01"
             $headers["X-Requested-With"] = "XMLHttpRequest"
 
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = [System.Uri]$R.BaseResponse.ResponseUri.AbsoluteUri
-            } else {
+            }
+            else {
                 # HttpsReponseMessage - powershell 6.2+
                 # $uri = [System.Uri]$R.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
 
@@ -256,12 +351,13 @@ Function Get-AwsFed {
             $txid = ($R2.Content | ConvertFrom-Json).response.txid
 
             $headers = @{}
-            $headers["Accept"]="text/plain, */*; q=0.01"
+            $headers["Accept"] = "text/plain, */*; q=0.01"
             $headers["X-Requested-With"] = "XMLHttpRequest"
 
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = [System.Uri]$R.BaseResponse.ResponseUri.AbsoluteUri
-            } else {
+            }
+            else {
                 # HttpsReponseMessage - powershell 6.2+
                 $t = $R.BaseResponse.RequestMessage.RequestUri
                 $uri = [System.Uri]$t.AbsoluteUri
@@ -300,18 +396,19 @@ Function Get-AwsFed {
                 return
             }
             if ($response.result -ne "SUCCESS") {
-                Write-Output ($response | convertto-json)
+                Write-Output ($response | ConvertTo-Json)
                 Write-Output "2-Factor NOT successful"
                 return
             }
 
             #-- additional page
             $headers = @{}
-            $headers["Accept"]="text/plain, */*; q=0.01"
+            $headers["Accept"] = "text/plain, */*; q=0.01"
             $headers["X-Requested-With"] = "XMLHttpRequest"
             If (($R.BaseResponse).GetType().Name -eq 'HttpWebResponse') {
                 $uri = [System.Uri]$R.BaseResponse.ResponseUri.AbsoluteUri
-            } else {
+            }
+            else {
                 # HttpsReponseMessage - powershell 6.2+
                 $t = $R.BaseResponse.RequestMessage.RequestUri
                 $uri = [System.Uri]$t.AbsoluteUri
@@ -404,79 +501,14 @@ Function Get-AwsFed {
     }
 }
 
-Function WebPost {
-    param (
-        [Parameter(Mandatory = $true)] [Uri] $uri,
-        [Parameter(Mandatory = $true)] [Object] $body,
-        [Parameter(Mandatory = $false)] [Int32] $maxRedirect = 5,
-        [Parameter(Mandatory = $false)] $basic = $false,
-        [Parameter(Mandatory = $false)] $headers = @{}
-    )
-
-    # Write-Verbose "<WebPost> Uri: $uri"
-
-    $p = @{ }
-    $p.Uri = $uri
-    $p.Method = "Post"
-    $p.Body = $body
-    $p.MaximumRedirection = $maxRedirect
-    $p.ErrorAction = "Ignore"
-    $p.UseBasicParsing = $basic
-    $p.UserAgent = $USER_AGENT
-    $p.Headers = $headers
-
-    Try {
-        Write-Verbose "[WebPost:Begin]"
-        Write-Verbose ($p | ConvertTo-Json)
-        $Response = Invoke-WebRequest @p -WebSession $global:fb
-        Write-Verbose "Response: $($Response.StatusCode) - $($Response.StatusDescription)"
-        # Write-Verbose "WebPost: $($Response)"
-        Write-Verbose "[WebPost:End]"
-        Return $Response
-    }
-    Catch {
-        # Write-Verbose $_.Exception.Message
-        # Write-Verbose $PSItem.Exception.Message
-        Return
-    }
-}
-
-Function WebGet {
-    param (
-        [Parameter(Mandatory = $true)] [Uri] $uri,
-        [Parameter(Mandatory = $false)] [Int32] $maxRedirect = 5,
-        [Parameter(Mandatory = $false)] $basic = $false,
-        [Parameter(Mandatory = $false)] $headers = @{}
-    )
-
-    $p = @{ }
-    $p.Uri = $uri
-    $p.Method = "Default"
-    $p.MaximumRedirection = $maxRedirect
-    $p.ErrorAction = "Ignore"
-    $p.UseBasicParsing = $basic
-    $p.UserAgent = $USER_AGENT
-    $p.Headers = $headers
-
-    Write-Verbose "[WebGet:Begin]"
-    Write-Verbose ($p | ConvertTo-Json)
-    $Response = Invoke-WebRequest @p -WebSession $global:fb
-    Write-Verbose "WebGet Response: $($Response.StatusCode) - $($Response.StatusDescription)"
-    Write-Verbose "[WebGet:End]"
-    # Write-Verbose "WebGet: $($Response)"
-    Return $Response
-}
-
 Function Get-AWSAccount {
     param($saml_rsp)
-
-    # parse aws saml response for account information
 
     $Parsed = $Parser.ParseDocument($saml_rsp.Content)
     $form = $parsed.forms[0]
     $t = $form.outerHTML.Split("`n").Trim() | Select-String "Account:"
 
-    # $t = $saml_rsp.ParsedHTML.body.outertext.Split("`n").Trim() | Select-String "Account:"
+    # parse list of accounts
     $a = [ordered]@{}
     foreach ($l in $t) {
         $l = ([string]$l).replace('<div ', '').replace('</div>', '')
@@ -530,52 +562,4 @@ Function Get-AWSAccount {
         $select = $list[$alias - 1]
     }
     Return $select
-}
-
-Function Clear-Globals {
-    Write-Verbose "Clearing GLobal Variables"
-    if ($fb) { Clear-Variable "fb" -Scope Global }
-    if ($fedCredential) { Clear-Variable "fedCredential"  -Scope Global }
-}
-
-Function Setup-AngleSharp {
-
-    # Load AngleSharp assembly and dependencies
-
-    $myError = $false
-    @(
-        'AngleSharp'
-        'System.Text.Encoding.CodePages',
-        'System.Runtime.CompilerServices.Unsafe'
-    ) | ForEach-Object {
-        $assembly = $_
-        try { Add-Type -AssemblyName $_ -ErrorAction Stop }
-
-        catch {
-
-            Try {
-                $path = (Get-Package $assembly -ErrorAction Stop).Source
-                $path = $path | Split-Path
-                Add-Type -Path (Get-ChildItem -Path "$path*\lib\netstandard2.0\*.dll").FullName
-            }
-            catch {
-                $myError = $true
-                Write-Warning "Missing $assembly. Please install the package from Nuget..."
-                Switch ($assembly) {
-                    "AngleSharp" { Write-Output "Install-Package -ProviderName Nuget -SkipDependencies -Name AngleSharp -Scope CurrentUser" }
-                    "System.Text.Encoding.CodePages" { Write-Output "Install-Package -ProviderName Nuget -SkipDependencies -Name System.Text.Encoding.CodePages -MaximumVersion 4.5.0 -Scope CurrentUser" }
-                    "System.Runtime.CompilerServices.Unsafe" { Write-Output "Install-Package -ProviderName Nuget -skipDependencies -Name System.Runtime.CompilerServices.Unsafe -MaximumVersion 4.5.0 -Scope CurrentUser" }
-                }
-                Write-Output ""
-            }
-        }
-    }
-    if ($myerror) {
-        try { $null = Get-PackageSource -Name nuget -ErrorAction Stop }
-        catch {
-            Write-Warning "Register nuget as a provider..."
-            Write-Output "Register-PackageSource -Name NuGet -Location 'https://www.nuget.org/api/v2' -ProviderName NuGet"
-        }
-        break foobar
-    }
 }
