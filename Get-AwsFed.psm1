@@ -162,6 +162,8 @@ Function Get-AwsFed {
 
             Write-Verbose "Begin ASU cas weblogin"
 
+            $Duo = Read-Host -Prompt "Enter a Duo Passcode or press Enter for Push"
+
             # -- post username and password
             Write-Verbose "Post Username & Password"
             $Parsed = $Parser.ParseDocument($R.Content)
@@ -287,11 +289,6 @@ Function Get-AwsFed {
             $form = $Parsed.forms | Where-Object ID -EQ 'login-form'
             $fields = @{}
             $form.elements | Where-Object { $_.type -NE 'fieldset' -and $_.parent.nodename -eq 'FORM' } | ForEach-Object { $fields.add( $_.name, $_.value ) }
-            $fields["device"] = "phone1"
-            $fields["factor"] = "Duo Push"
-            $fields["out_of_date"] = "False"
-            $fields["days_out_of_date"] = "0"
-            $fields["days_to_block"] = "None"
             $null = $fields.Remove("url")
             $null = $fields.Remove("enrollment_message")
             $null = $fields.Remove("itype")
@@ -307,6 +304,17 @@ Function Get-AwsFed {
             $null = $fields.Remove("should_retry_u2f_timeouts")
             $null = $fields.Remove("has_phone_that_requires_compliance_text")
             $null = $fields.Remove("ukey")
+
+            $fields["device"] = "phone1"
+            if ($duo) {
+                $fields["factor"] = "Passcode"
+                $fields["passcode"] = $Duo
+            } else {
+                $fields["factor"] = "Duo Push"
+            }
+            $fields["out_of_date"] = "False"
+            $fields["days_out_of_date"] = "0"
+            $fields["days_to_block"] = "None"
 
             $sid = urldecode $fields["sid"]
 
