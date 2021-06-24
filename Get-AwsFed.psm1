@@ -309,7 +309,8 @@ Function Get-AwsFed {
             if ($duo) {
                 $fields["factor"] = "Passcode"
                 $fields["passcode"] = $Duo
-            } else {
+            }
+            else {
                 $fields["factor"] = "Duo Push"
             }
             $fields["out_of_date"] = "False"
@@ -469,14 +470,16 @@ Function Get-AwsFed {
 
         $cred = $STSRole.Credentials
         Write-Output "`nCredential Expiration: $(Get-Date $STSRole.Credentials.Expiration -Format 'MM/dd/yyyy h:mm:ss tt' )" # -ForegroundColor Green
+        $hours = (New-TimeSpan (Get-Date) (Get-Date $STSRole.Credentials.Expiration) ).TotalHours
+        Write-Output ("                     : +" + $hours.ToString("0.00") + " hours")
 
         Write-Verbose "[Set-AWSCredential]"
-        $p = @{}
-        $p.AccessKey = $cred.AccessKeyId
-        $p.SecretKey = $cred.SecretAccessKey
-        $p.SessionToken = $cred.SessionToken
-        $p.ProfileLocation = "$env:userprofile\.aws\credentials"
-
+        $p = @{
+            AccessKey       = $cred.AccessKeyId
+            SecretKey       = $cred.SecretAccessKey
+            SessionToken    = $cred.SessionToken
+            ProfileLocation = "$env:userprofile\.aws\credentials"
+        }
         if (-not $noDefault.IsPresent) {
             $p.StoreAs = 'default'
             Set-AWSCredential @p
