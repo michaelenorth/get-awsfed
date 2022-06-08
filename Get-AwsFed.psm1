@@ -1,6 +1,4 @@
 # Set-StrictMode -Version latest
-# $USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.114 Safari/537.36 Edg/89.0.774.68"
-# $USER_AGENT = [Microsoft.PowerShell.Commands.PSUserAgent]::Chrome
 $USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.5005.63 Safari/537.36 Edg/102.0.1245.33"
 
 Function UrlEncode ($urlToEncode) {
@@ -21,12 +19,10 @@ function MergeHashtable($a, $b) {
             $a.remove($k)
         }
     }
-
     return $a + $b
 }
 
 $defaultHeaders = @{
-    # "accept"="text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9"
     # "accept"="text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9"
     # "accept-encoding"="gzip, deflate, br"
     "accept-language" = "en-US,en;q=0.9"
